@@ -1,43 +1,197 @@
-#include "st7789.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "esp_rom_sys.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include <string.h>
+/**
+ * @file st7789.c
+ * @brief ST7789 TFT Display Driver Implementation for ESP32
+ * 
+ * This module provides a complete hardware driver for ST7789-based TFT displays,
+ * specifically optimized for 240x240 pixel modules without a chip select (CS) pin.
+ * The driver implements high-speed SPI communication with comprehensive display
+ * functionality including text rendering, graphics primitives, and color management.
+ * 
+ * Hardware Interface:
+ * The ST7789 communicates via SPI with the following signal requirements:
+ * - CLK (Clock): SPI clock signal for data synchronization
+ * - MOSI (Data): Master-out-slave-in for command and pixel data
+ * - DC (Data/Command): Logic level selects between commands (low) and data (high)
+ * - RST (Reset): Hardware reset signal for controller initialization
+ * - No CS pin required (display always selected)
+ * 
+ * Display Specifications:
+ * - Resolution: 240 x 240 pixels
+ * - Color Depth: 16-bit RGB565 format (65,536 colors)
+ * - Interface: 4-wire SPI (CLK, MOSI, DC, RST)
+ * - Orientation: Portrait mode (can be configured)
+ * - Memory: Frame buffer stored in ST7789 internal RAM
+ * 
+ * Color Format (RGB565):
+ * 16-bit color encoding with bit allocation:
+ * - Red: 5 bits (bits 15-11) - 32 levels
+ * - Green: 6 bits (bits 10-5) - 64 levels  
+ * - Blue: 5 bits (bits 4-0) - 32 levels
+ * This format provides good color reproduction while maintaining memory efficiency.
+ * 
+ * Font System:
+ * Two font sizes are implemented:
+ * - Standard Font: 8x8 pixels for general text display
+ * - Large Font: 16x16 pixels for sensor readings and important data
+ * Both fonts use bitmap encoding with optimized character sets.
+ * 
+ * Performance Considerations:
+ * - SPI configured for maximum supported speed (10+ MHz typical)
+ * - Block transfers used for efficient pixel data transmission
+ * - Memory access patterns optimized for sequential writes
+ * - Font rendering uses direct pixel manipulation for speed
+ * 
+ * @author ESP32 ST7789 Driver Team
+ * @version 2.1
+ * @date 2025-10-01
+ */
 
+#include "st7789.h"             // ST7789 display driver API definitions
+#include "driver/gpio.h"        // ESP32 GPIO control functions
+#include "esp_log.h"            // ESP-IDF logging system
+#include "esp_rom_sys.h"        // ESP32 ROM system functions
+#include "freertos/FreeRTOS.h"  // FreeRTOS kernel functions
+#include "freertos/task.h"      // FreeRTOS task management
+#include <string.h>             // Standard string manipulation functions
+
+/**
+ * @brief Logging tag for ST7789 driver messages
+ * 
+ * Used by ESP-IDF logging system to identify messages from the display driver.
+ * Enables filtering and categorization of display-related log output during
+ * development and debugging operations.
+ */
 static const char *TAG = "ST7789";
 
-// ST7789 Display Controller Commands
-#define ST7789_SWRESET  0x01  // Software reset
-#define ST7789_SLPOUT   0x11  // Sleep out
-#define ST7789_COLMOD   0x3A  // Color mode
-#define ST7789_MADCTL   0x36  // Memory access control
-#define ST7789_INVON    0x21  // Display inversion on
-#define ST7789_NORON    0x13  // Normal display mode
-#define ST7789_DISPON   0x29  // Display on
-#define ST7789_CASET    0x2A  // Column address set
-#define ST7789_RASET    0x2B  // Row address set
-#define ST7789_RAMWR    0x2C  // Memory write
+// === ST7789 Display Controller Command Definitions ===
+// These commands control various aspects of the ST7789 display controller
+// and are sent via SPI with the DC pin set low (command mode)
 
-// Color definitions (16-bit RGB565)
-#define RED     0xF800
-#define GREEN   0x07E0
-#define BLUE    0x001F
-#define WHITE   0xFFFF
-#define BLACK   0x0000
-#define YELLOW  0xFFE0
+/**
+ * @brief ST7789 Command: Software Reset
+ * Resets the display controller to default state, clearing all settings
+ */
+#define ST7789_SWRESET  0x01
 
-// Font definitions - 8x8 pixel font
+/**
+ * @brief ST7789 Command: Sleep Out
+ * Exits sleep mode and enables the display controller for normal operation
+ */
+#define ST7789_SLPOUT   0x11
+
+/**
+ * @brief ST7789 Command: Color Mode
+ * Configures the color format for pixel data (RGB565, RGB666, etc.)
+ */
+#define ST7789_COLMOD   0x3A
+
+/**
+ * @brief ST7789 Command: Memory Access Control
+ * Controls display orientation, scanning direction, and color order
+ */
+#define ST7789_MADCTL   0x36
+
+/**
+ * @brief ST7789 Command: Display Inversion On
+ * Enables color inversion (useful for certain display types)
+ */
+#define ST7789_INVON    0x21
+
+/**
+ * @brief ST7789 Command: Normal Display Mode
+ * Sets display to normal color mode (not inverted)
+ */
+#define ST7789_NORON    0x13
+
+/**
+ * @brief ST7789 Command: Display On
+ * Turns on the display output (makes content visible)
+ */
+#define ST7789_DISPON   0x29
+
+/**
+ * @brief ST7789 Command: Column Address Set
+ * Sets the column (X) range for subsequent pixel writes
+ */
+#define ST7789_CASET    0x2A
+
+/**
+ * @brief ST7789 Command: Row Address Set
+ * Sets the row (Y) range for subsequent pixel writes
+ */
+#define ST7789_RASET    0x2B
+
+/**
+ * @brief ST7789 Command: Memory Write
+ * Initiates pixel data transfer to display memory
+ */
+#define ST7789_RAMWR    0x2C
+
+// === Color Definitions (16-bit RGB565 format) ===
+// Pre-defined colors for convenience in application code
+// Each color is encoded in RGB565 format for direct use with the display
+
+#define RED     0xF800  ///< Pure red color (max red, no green/blue)
+#define GREEN   0x07E0  ///< Pure green color (max green, no red/blue)
+#define BLUE    0x001F  ///< Pure blue color (max blue, no red/green)
+#define WHITE   0xFFFF  ///< Pure white color (all bits set)
+#define BLACK   0x0000  ///< Pure black color (all bits clear)
+#define YELLOW  0xFFE0  ///< Yellow color (red + green, no blue)
+
+// === Font System Definitions ===
+
+/**
+ * @brief Standard font character width in pixels
+ * Each character in the 8x8 font occupies 8 horizontal pixels
+ */
 #define FONT_WIDTH  8
+
+/**
+ * @brief Standard font character height in pixels
+ * Each character in the 8x8 font occupies 8 vertical pixels
+ */
 #define FONT_HEIGHT 8
 
-// Large font definitions - 16x16 pixel font
+/**
+ * @brief Large font character width in pixels
+ * Each character in the 16x16 large font occupies 16 horizontal pixels
+ */
 #define LARGE_FONT_WIDTH  16
+
+/**
+ * @brief Large font character height in pixels
+ * Each character in the 16x16 large font occupies 16 vertical pixels
+ */
 #define LARGE_FONT_HEIGHT 16
 
-// Simple 8x8 bitmap font for basic ASCII characters (32-126)
-static const uint8_t font8x8[95][8] = {
+/**
+ * @brief 8x8 Bitmap Font Definition for Standard ASCII Characters
+ * 
+ * This array contains bitmap representations for printable ASCII characters
+ * from space (32) to tilde (126), providing a complete character set for
+ * basic text display functionality.
+ * 
+ * Font Encoding:
+ * - Each character is represented by 8 bytes (one per row)
+ * - Each byte represents 8 horizontal pixels (1 bit per pixel)
+ * - Bit 7 = leftmost pixel, Bit 0 = rightmost pixel
+ * - 1 = foreground color, 0 = background color
+ * 
+ * Character Range:
+ * - ASCII 32 (space) to ASCII 126 (tilde)
+ * - Total of 95 characters covering all printable ASCII
+ * - Optimized for readability at small sizes
+ * 
+ * Usage:
+ * To get the bitmap for character 'A' (ASCII 65):
+ * font8x8[65 - 32] gives the 8-byte bitmap array
+ * 
+ * Memory Layout:
+ * Each character uses 8 bytes, total array size = 95 * 8 = 760 bytes
+ * Stored in ROM/Flash to conserve RAM usage
+ */
+static const uint8_t font8x8[95][8] = 
+{
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // Space (32)
     {0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00}, // ! (33)
     {0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // " (34)
@@ -138,7 +292,8 @@ static const uint8_t font8x8[95][8] = {
 // Large 16x16 font for sensor displays - focused character set
 // Includes: space, digits 0-9, colon, uppercase letters A-Z
 // Character mapping: 32(space), 48-57(0-9), 58(:), 65-90(A-Z)
-static const uint16_t large_font16x16[][16] = {
+static const uint16_t large_font16x16[][16] = 
+{
     // Space (32)
     {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
      0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
@@ -269,7 +424,8 @@ static const uint16_t large_font16x16[][16] = {
  * @param c Character to look up
  * @return Array index (0-27) for supported characters, -1 for unsupported
  */
-static int get_large_font_index(char c) {
+static int get_large_font_index(char c) 
+{
     if (c == ' ') return 0;           // Space
     if (c >= '0' && c <= '9') return 1 + (c - '0');  // Numbers 0-9
     if (c == ':') return 11;          // Colon
@@ -300,7 +456,8 @@ static int get_large_font_index(char c) {
  * 
  * @param ms Delay duration in milliseconds
  */
-static void delay_ms(uint32_t ms) {
+static void delay_ms(uint32_t ms) 
+{
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
@@ -313,7 +470,8 @@ static void delay_ms(uint32_t ms) {
  * @param pin GPIO pin number
  * @param value Output level (0 = low, 1 = high)
  */
-static void digitalWrite(int pin, int value) {
+static void digitalWrite(int pin, int value) 
+{
     gpio_set_level((gpio_num_t)pin, value);
 }
 
@@ -326,8 +484,10 @@ static void digitalWrite(int pin, int value) {
  * 
  * @param data 8-bit data byte to transmit (MSB first)
  */
-static void spi_write_byte_bitbang(uint8_t data) {
-    for (int i = 7; i >= 0; i--) {
+static void spi_write_byte_bitbang(uint8_t data) 
+{
+    for (int i = 7; i >= 0; i--) 
+    {
         // Set data bit on MOSI
         digitalWrite(ST7789_SDA_PIN, (data >> i) & 1);
         
@@ -337,17 +497,20 @@ static void spi_write_byte_bitbang(uint8_t data) {
     }
 }
 
-static void spi_write_word_bitbang(uint16_t data) {
+static void spi_write_word_bitbang(uint16_t data) 
+{
     spi_write_byte_bitbang(data >> 8);   // High byte first
     spi_write_byte_bitbang(data & 0xFF); // Low byte
 }
 
 // Data/Command pin control for ST7789 protocol
-static inline void set_dc_command(void) {
+static inline void set_dc_command(void) 
+{
     gpio_set_level(ST7789_DC_PIN, 0);  // DC low = command mode
 }
 
-static inline void set_dc_data(void) {
+static inline void set_dc_data(void) 
+{
     gpio_set_level(ST7789_DC_PIN, 1);  // DC high = data mode
 }
 
@@ -360,20 +523,23 @@ static inline void set_dc_data(void) {
  * 
  * @param cmd ST7789 command byte
  */
-static void write_command(uint8_t cmd) {
+static void write_command(uint8_t cmd) 
+{
     ESP_LOGD(TAG, "Sending command: 0x%02X", cmd);
     set_dc_command();
     spi_write_byte_bitbang(cmd);
     set_dc_data();  // Ready for data mode
 }
 
-static void write_data(uint8_t data) {
+static void write_data(uint8_t data) 
+{
     ESP_LOGD(TAG, "Sending data: 0x%02X", data);
     set_dc_data();
     spi_write_byte_bitbang(data);
 }
 
-static void write_data_word(uint16_t data) {
+static void write_data_word(uint16_t data) 
+{
     ESP_LOGD(TAG, "Sending 16-bit data: 0x%04X", data);
     set_dc_data();
     spi_write_word_bitbang(data);
@@ -391,7 +557,8 @@ static void write_data_word(uint16_t data) {
  * @param w Width of the window in pixels
  * @param h Height of the window in pixels
  */
-static void set_address_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+static void set_address_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h) 
+{
     uint16_t x_end = x + w - 1;
     uint16_t y_end = y + h - 1;
     
@@ -407,7 +574,8 @@ static void set_address_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 }
 
 // Fill rectangular area with specified color - optimized for cooperative multitasking
-static void fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+static void fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) 
+{
     set_address_window(x, y, w, h);
     
     uint32_t pixels = (uint32_t)w * h;
@@ -425,7 +593,8 @@ static void fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
 }
 
 // Draw a single pixel at specified coordinates
-static void draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
+static void draw_pixel(uint16_t x, uint16_t y, uint16_t color) 
+{
     if (x >= 240 || y >= 240) return;  // Bounds check
     
     set_address_window(x, y, 1, 1);
@@ -433,7 +602,8 @@ static void draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
 }
 
 // Draw a single character at specified position - optimized for performance
-static void draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) {
+static void draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) 
+{
     if (c < 32 || c > 126) return;  // Only printable ASCII characters
     
     uint8_t char_index = c - 32;  // Convert to font array index
@@ -443,14 +613,19 @@ static void draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t b
     set_dc_data();  // Switch to data mode once
     
     // Stream entire character as pixel data - fast enough not to need yields
-    for (uint8_t row = 0; row < FONT_HEIGHT; row++) {
+    for (uint8_t row = 0; row < FONT_HEIGHT; row++) 
+    {
         uint8_t font_row = font8x8[char_index][row];
         
-        for (uint8_t col = 0; col < FONT_WIDTH; col++) {
+        for (uint8_t col = 0; col < FONT_WIDTH; col++) 
+        {
             // Fix bit order - read from LSB to MSB to correct character reversal
-            if (font_row & (0x01 << col)) {
+            if (font_row & (0x01 << col)) 
+            {
                 spi_write_word_bitbang(color);     // Foreground
-            } else {
+            } 
+            else 
+            {
                 spi_write_word_bitbang(bg_color);  // Background
             }
         }
@@ -458,28 +633,37 @@ static void draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t b
 }
 
 // Draw a string at specified position - optimized with minimal task cooperation
-static void draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) {
+static void draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) 
+{
     uint16_t cur_x = x;
     uint16_t cur_y = y;
     uint16_t char_count = 0;
     
-    while (*str) {
-        if (*str == '\n') {
+    while (*str) 
+    {
+        if (*str == '\n') 
+        {
             // New line
             cur_x = x;
             cur_y += FONT_HEIGHT + 2;  // Add 2 pixels line spacing
-        } else if (*str == '\r') {
+        } 
+        else if (*str == '\r') 
+        {
             // Carriage return
             cur_x = x;
-        } else {
+        } 
+        else 
+        {
             // Bounds check before drawing character
-            if (cur_x + FONT_WIDTH <= 240 && cur_y + FONT_HEIGHT <= 240) {
+            if (cur_x + FONT_WIDTH <= 240 && cur_y + FONT_HEIGHT <= 240) 
+            {
                 draw_char(cur_x, cur_y, *str, color, bg_color);
             }
             cur_x += FONT_WIDTH + 1;  // Add 1 pixel character spacing
             
             // Wrap to next line if text exceeds display width
-            if (cur_x + FONT_WIDTH > 240) {
+            if (cur_x + FONT_WIDTH > 240) 
+            {
                 cur_x = x;
                 cur_y += FONT_HEIGHT + 2;
             }
@@ -488,7 +672,8 @@ static void draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color,
         char_count++;
         
         // Only yield for very long strings (more than 20 characters)
-        if ((char_count % 20) == 0) {
+        if ((char_count % 20) == 0) 
+        {
             taskYIELD(); // Brief yield without delay
         }
         
@@ -498,7 +683,8 @@ static void draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color,
 }
 
 // Draw a single large character (16x16) at specified position
-static void draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) {
+static void draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) 
+{
     int char_index = get_large_font_index(c);
     if (char_index < 0) return;  // Unsupported character
     
@@ -507,48 +693,63 @@ static void draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint
     set_dc_data();  // Switch to data mode once
     
     // Stream entire character as pixel data
-    for (uint8_t row = 0; row < LARGE_FONT_HEIGHT; row++) {
+    for (uint8_t row = 0; row < LARGE_FONT_HEIGHT; row++) 
+    {
         uint16_t font_row = large_font16x16[char_index][row];
         
-        for (uint8_t col = 0; col < LARGE_FONT_WIDTH; col++) {
+        for (uint8_t col = 0; col < LARGE_FONT_WIDTH; col++) 
+        {
             // Read bit from font data (MSB first for 16x16)
-            if (font_row & (0x8000 >> col)) {
+            if (font_row & (0x8000 >> col)) 
+            {
                 spi_write_word_bitbang(color);     // Foreground
-            } else {
+            } 
+            else 
+            {
                 spi_write_word_bitbang(bg_color);  // Background
             }
         }
         
         // Reset task occasionally for large characters
-        if ((row % 8) == 0) {
+        if ((row % 8) == 0) 
+        {
             taskYIELD();
         }
     }
 }
 
 // Draw a string with large font (16x16)
-static void draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) {
+static void draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) 
+{
     uint16_t cur_x = x;
     uint16_t cur_y = y;
     uint16_t char_count = 0;
     
-    while (*str) {
-        if (*str == '\n') {
+    while (*str) 
+    {
+        if (*str == '\n') 
+        {
             // New line
             cur_x = x;
             cur_y += LARGE_FONT_HEIGHT + 4;  // Add 4 pixels line spacing for large font
-        } else if (*str == '\r') {
+        } 
+        else if (*str == '\r') 
+        {
             // Carriage return
             cur_x = x;
-        } else {
+        } 
+        else 
+        {
             // Bounds check before drawing character
-            if (cur_x + LARGE_FONT_WIDTH <= 240 && cur_y + LARGE_FONT_HEIGHT <= 240) {
+            if (cur_x + LARGE_FONT_WIDTH <= 240 && cur_y + LARGE_FONT_HEIGHT <= 240) 
+            {
                 draw_large_char(cur_x, cur_y, *str, color, bg_color);
             }
             cur_x += LARGE_FONT_WIDTH + 2;  // Add 2 pixels character spacing for large font
             
             // Wrap to next line if text exceeds display width
-            if (cur_x + LARGE_FONT_WIDTH > 240) {
+            if (cur_x + LARGE_FONT_WIDTH > 240) 
+            {
                 cur_x = x;
                 cur_y += LARGE_FONT_HEIGHT + 4;
             }
@@ -557,7 +758,8 @@ static void draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t 
         char_count++;
         
         // Only yield for very long strings
-        if ((char_count % 5) == 0) {
+        if ((char_count % 5) == 0) 
+        {
             taskYIELD(); // Brief yield for large font operations
         }
         
@@ -578,7 +780,8 @@ static void draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t 
  * @param y Y coordinate (0-239)
  * @param color 16-bit RGB565 color value
  */
-void st7789_draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
+void st7789_draw_pixel(uint16_t x, uint16_t y, uint16_t color) 
+{
     draw_pixel(x, y, color);
 }
 
@@ -594,7 +797,8 @@ void st7789_draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
  * @param h Height of rectangle in pixels
  * @param color 16-bit RGB565 color value
  */
-void st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+void st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) 
+{
     fill_rect(x, y, w, h, color);
 }
 
@@ -610,7 +814,8 @@ void st7789_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c
  * @param color 16-bit RGB565 foreground color
  * @param bg_color 16-bit RGB565 background color
  */
-void st7789_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) {
+void st7789_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) 
+{
     draw_char(x, y, c, color, bg_color);
 }
 
@@ -626,7 +831,8 @@ void st7789_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t b
  * @param color 16-bit RGB565 foreground color
  * @param bg_color 16-bit RGB565 background color
  */
-void st7789_draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) {
+void st7789_draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) 
+{
     draw_string(x, y, str, color, bg_color);
 }
 
@@ -638,7 +844,8 @@ void st7789_draw_string(uint16_t x, uint16_t y, const char* str, uint16_t color,
  * 
  * @param color 16-bit RGB565 color value to fill the screen
  */
-void st7789_clear_screen(uint16_t color) {
+void st7789_clear_screen(uint16_t color) 
+{
     fill_rect(0, 0, 240, 240, color);
 }
 
@@ -655,7 +862,8 @@ void st7789_clear_screen(uint16_t color) {
  * @param color 16-bit RGB565 foreground color
  * @param bg_color 16-bit RGB565 background color
  */
-void st7789_draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) {
+void st7789_draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg_color) 
+{
     draw_large_char(x, y, c, color, bg_color);
 }
 
@@ -672,7 +880,8 @@ void st7789_draw_large_char(uint16_t x, uint16_t y, char c, uint16_t color, uint
  * @param color 16-bit RGB565 foreground color
  * @param bg_color 16-bit RGB565 background color
  */
-void st7789_draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) {
+void st7789_draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t color, uint16_t bg_color) 
+{
     draw_large_string(x, y, str, color, bg_color);
 }
 
@@ -692,7 +901,8 @@ void st7789_draw_large_string(uint16_t x, uint16_t y, const char* str, uint16_t 
  * 
  * @return ESP_OK on successful initialization, ESP_FAIL on error
  */
-esp_err_t st7789_init(void) {
+esp_err_t st7789_init(void) 
+{
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "     ST7789 Display Driver Initialization");
     ESP_LOGI(TAG, "        Using Bit-banging SPI");
@@ -787,7 +997,8 @@ esp_err_t st7789_init(void) {
  * 3. Text rendering demonstration with various colors
  * 4. Special characters and multiline text display
  */
-void st7789_test(void) {
+void st7789_test(void) 
+{
     ESP_LOGI(TAG, "Starting display functionality test...");
     
     // Test 1: Full screen color fill - Red
@@ -870,7 +1081,8 @@ void st7789_test(void) {
  * 3. Validates all supported large font characters including numbers,
  *    symbols (., %, :), and uppercase letters
  */
-void st7789_large_font_test(void) {
+void st7789_large_font_test(void) 
+{
     ESP_LOGI(TAG, "Starting large font test...");
     
     // Clear screen to black

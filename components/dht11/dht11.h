@@ -1,11 +1,24 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifndef DHT11_H
 #define DHT11_H
+
+/*============================================================================*/
+/* INCLUDE FILES
+ - system and project includes
+ - needed interfaces from external units
+ - internal and external interfaces from this unit
+ */
 
 #include "esp_err.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include "pinout.h"
 
+/*============================================================================*/
+/* EXPORTED CONSTANTS */
 /**
  * @file dht11.h
  * @brief DHT11 Temperature and Humidity Sensor Driver for ESP32
@@ -16,12 +29,17 @@
  * GPIO pin assignments are defined in pinout.h for centralized management.
  */
 
-// DHT11 timing constants (in microseconds)
+// DHT11 timing constants (in microseconds) - Aggressive tolerances for difficult sensors
 #define DHT11_START_LOW_TIME     18000  // 18ms low signal to start
-#define DHT11_START_HIGH_TIME    20     // 20-40µs high signal
-#define DHT11_RESPONSE_TIMEOUT   100    // Max time to wait for response
-#define DHT11_BIT_TIMEOUT        100    // Max time to wait for bit
+#define DHT11_START_HIGH_TIME    40     // 20-40µs high signal (maximum spec)
+#define DHT11_RESPONSE_TIMEOUT   500    // Max time to wait for response (5x increased)
+#define DHT11_BIT_TIMEOUT        500    // Max time to wait for bit (5x increased)
 #define DHT11_BIT_THRESHOLD      50     // Threshold to distinguish 0/1 bits
+#define DHT11_STABILIZATION_MS   200    // Stabilization delay before communication
+
+// DHT11 retry configuration
+#define DHT11_MAX_RETRIES        3      // Maximum read attempts
+#define DHT11_RETRY_DELAY_MS     500    // Delay between retry attempts (increased)
 
 // DHT11 measurement limits
 #define DHT11_TEMP_MIN          0       // Minimum temperature (°C)
@@ -29,15 +47,19 @@
 #define DHT11_HUMIDITY_MIN      20      // Minimum humidity (%)
 #define DHT11_HUMIDITY_MAX      95      // Maximum humidity (%)
 
+/*============================================================================*/
+/* EXPORTED TYPEDEFINITIONS */
 /**
  * @brief DHT11 sensor data structure
  */
 typedef struct {
     float temperature;    // Temperature in Celsius
     float humidity;       // Relative humidity in percentage
-    bool valid;          // True if data is valid (checksum passed)
+    bool valid;           // True if data is valid (checksum passed)
 } dht11_data_t;
 
+/*============================================================================*/
+/* EXPORTED FUNCTIONS */
 /**
  * @brief Initialize DHT11 temperature and humidity sensor
  * 
@@ -47,7 +69,7 @@ typedef struct {
  * @return ESP_OK on success, ESP_FAIL on error
  */
 esp_err_t dht11_init(void);
-
+/*----------------------------------------------------------------------------*/
 /**
  * @brief Read temperature and humidity from DHT11 sensor
  * 
@@ -61,7 +83,7 @@ esp_err_t dht11_init(void);
  * @return ESP_OK on successful read, ESP_FAIL on communication error
  */
 esp_err_t dht11_read(dht11_data_t* data);
-
+/*----------------------------------------------------------------------------*/
 /**
  * @brief Get temperature as formatted string
  * 
@@ -73,7 +95,7 @@ esp_err_t dht11_read(dht11_data_t* data);
  * @return ESP_OK on success, ESP_INVALID_ARG on invalid parameters
  */
 esp_err_t dht11_get_temperature_string(char* buffer, size_t buffer_size);
-
+/*----------------------------------------------------------------------------*/
 /**
  * @brief Get humidity as formatted string
  * 
@@ -87,3 +109,10 @@ esp_err_t dht11_get_temperature_string(char* buffer, size_t buffer_size);
 esp_err_t dht11_get_humidity_string(char* buffer, size_t buffer_size);
 
 #endif // DHT11_H
+/*============================================================================*/
+
+#ifdef __cplusplus
+}
+#endif
+
+/** @} */
