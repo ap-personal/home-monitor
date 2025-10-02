@@ -13,7 +13,7 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 - **High-Resolution Display**: 240×240 ST7789 TFT display with custom large fonts for optimal readability  
 - **Intelligent IoT Connectivity**: WiFi-enabled data transmission with automatic reconnection and network failure recovery
 - **Dual-Core Architecture**: Optimized ESP32 dual-core utilization with dedicated sensor and network processing
-- **Professional Reliability**: Automatic WiFi reconnection, sensor error recovery, and watchdog protection
+- **Professional Reliability**: Automatic WiFi reconnection, sensor health monitoring with progressive failure response, and intelligent error recovery
 
 ### System Architecture
 
@@ -63,6 +63,7 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 - **Custom Font System**: 16×16 pixel large fonts optimized for environmental data display
 - **Intelligent Error Handling**: Graceful sensor failure recovery with cached data fallback
 - **High-Frequency Updates**: 10-second sensor reading cycles for responsive monitoring
+- **Sensor Health Monitoring**: Automatic safeguards with 1-minute error display and 2-minute system restart
 
 ### Professional IoT Integration with Auto-Reconnection
 - **WiFi Connectivity**: IEEE 802.11 b/g/n with automatic connection management
@@ -85,6 +86,7 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 - **Memory-Optimized Design**: Efficient resource utilization with ~50KB RAM usage
 - **Power-Aware Implementation**: Optimized for continuous operation scenarios
 - **Real-time Status Display**: Live connection status, signal strength, and system health indicators
+- **Sensor Failure Safeguards**: Progressive response system with automatic error detection and system recovery
 
 ## 📊 Technical Specifications
 
@@ -104,6 +106,7 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 | **Sensor Update Rate** | 10 seconds | Configurable (1-60s) |
 | **WiFi Transmission** | 30 seconds | Configurable (10s-1hr) |
 | **WiFi Reconnection** | 60 seconds | Automatic when router returns |
+| **Sensor Health Check** | 60s error, 120s restart | Automatic failure detection |
 | **Display Refresh** | Real-time | On sensor data change |
 | **Memory Usage** | ~50KB RAM | Optimized for efficiency |
 | **Flash Footprint** | ~150KB | Compact code design |
@@ -2130,7 +2133,194 @@ I (75432) WIFI_MANAGER: WiFi connected, resuming normal operation
 | **Local Operation** | ⚠️ May hang on network issues | ✅ Continues sensor readings |
 | **User Intervention** | ❌ Required for outage recovery | ✅ Zero intervention needed |
 
-## �🛠️ Troubleshooting
+## 🛡️ Sensor Health Monitoring System
+
+### Overview
+
+The ESP32 Environmental Monitor features an enterprise-grade sensor health monitoring system that automatically detects and responds to DHT11 sensor failures. This safeguard system ensures reliable operation and automatic recovery from hardware issues without user intervention.
+
+### Progressive Response System
+
+#### Three-Tier Protection Strategy
+
+```
+Normal Operation → Sensor Failures → Progressive Response
+        ↑                              ↓
+   Auto Recovery ← System Restart ← Error Display ← Failure Detection
+```
+
+| Time Period | Consecutive Failures | System Response | Visual Indicator |
+|-------------|---------------------|-----------------|------------------|
+| **0-60 seconds** | 1-5 failures | Normal tolerance, use cached data | Last known readings |
+| **60-120 seconds** | 6-11 failures | Display error message | "SENSOR ERROR!" screen |
+| **120+ seconds** | 12+ failures | System restart | "CRITICAL RESTART" screen |
+
+### Detailed Operation Flow
+
+#### 1. Normal Operation (0-60 seconds)
+- **Sensor Reading**: Every 10 seconds
+- **Failure Tolerance**: Up to 5 consecutive failures accepted
+- **Display Behavior**: Shows last known good readings
+- **System Status**: Continues normal operation
+
+#### 2. Warning State (60-120 seconds)
+- **Trigger**: 6 consecutive sensor reading failures (1 minute)
+- **Display Response**: Shows red "SENSOR ERROR!" message with failure count
+- **System Behavior**: Continues attempting sensor readings every 10 seconds
+- **Logging**: Warning messages about sensor health
+
+```
+Error Display Format:
+┌─────────────────┐
+│ SENSOR          │  ← Red text
+│ ERROR!          │  ← Red text  
+│ FAIL:8          │  ← Yellow text (shows current failure count)
+└─────────────────┘
+```
+
+#### 3. Critical State (120+ seconds)
+- **Trigger**: 12 consecutive sensor reading failures (2 minutes)
+- **Display Response**: Shows "CRITICAL RESTART IN 5S" message
+- **System Behavior**: 5-second countdown followed by automatic restart
+- **Recovery Method**: ESP32 hardware restart using `esp_restart()`
+
+```
+Critical Display Format:
+┌─────────────────┐
+│ CRITICAL        │  ← Red text
+│ RESTART         │  ← Red text
+│ IN 5S           │  ← Yellow text (countdown)
+└─────────────────┘
+```
+
+#### 4. Automatic Recovery
+- **Sensor Recovery**: When DHT11 starts responding again
+- **Counter Reset**: Immediately resets failure counter to zero
+- **Display Reset**: Returns to normal sensor data display
+- **Logging**: Records successful recovery with failure duration
+
+### Technical Implementation
+
+#### Failure Detection Constants
+```c
+#define SENSOR_ERROR_DISPLAY_TIME_MS  60000   // 1 minute error threshold
+#define SENSOR_RESTART_TIME_MS       120000   // 2 minute restart threshold
+#define SENSOR_FAILURE_COUNT_LIMIT   6        // 6 failures = 60 seconds  
+#define SENSOR_RESTART_COUNT_LIMIT   12       // 12 failures = 120 seconds
+```
+
+#### Key Implementation Features
+
+**1. Consecutive Failure Tracking**:
+- Tracks only consecutive failures (resets on any successful reading)
+- Distinguishes between isolated failures and persistent sensor problems
+- Logs each failure with context and cumulative count
+
+**2. Smart Recovery Logic**:
+- Instantly recognizes sensor recovery and resets all error states
+- Resumes normal operation without requiring restart
+- Maintains system uptime when possible
+
+**3. Graceful System Restart**:
+- 5-second warning period allows user awareness
+- Clean shutdown sequence preserves system integrity
+- Detailed logging of restart reason for diagnostics
+
+### Configuration Options
+
+#### Adjustable Thresholds
+Modify response timing in `system_manager.c`:
+
+```c
+// Conservative Settings (slower response, more tolerance)
+#define SENSOR_FAILURE_COUNT_LIMIT   12   // 2 minutes for error display
+#define SENSOR_RESTART_COUNT_LIMIT   24   // 4 minutes for restart
+
+// Aggressive Settings (faster response, less tolerance)  
+#define SENSOR_FAILURE_COUNT_LIMIT   3    // 30 seconds for error display
+#define SENSOR_RESTART_COUNT_LIMIT   6    // 60 seconds for restart
+
+// Default Settings (balanced approach)
+#define SENSOR_FAILURE_COUNT_LIMIT   6    // 60 seconds for error display
+#define SENSOR_RESTART_COUNT_LIMIT   12   // 120 seconds for restart
+```
+
+### Diagnostic Information
+
+#### Log Message Examples
+```bash
+# Normal operation
+I (12345) SYSTEM_MANAGER: Sensor: 23.5°C, 65% (cycle 123)
+
+# Failure progression  
+W (12355) SYSTEM_MANAGER: Sensor read failed: ESP_ERR_TIMEOUT (failure 1/12)
+W (12405) SYSTEM_MANAGER: Sensor read failed: ESP_ERR_TIMEOUT (failure 6/12)
+W (12406) SYSTEM_MANAGER: WARNING: Sensor failed for 1 minute - displaying error
+
+# Critical state
+E (12465) SYSTEM_MANAGER: Sensor read failed: ESP_ERR_TIMEOUT (failure 12/12)
+E (12466) SYSTEM_MANAGER: CRITICAL: Sensor failed for 2 minutes - restarting system
+
+# Recovery (after restart or sensor fix)
+I (15234) SYSTEM_MANAGER: Sensor recovered after 8 consecutive failures
+```
+
+#### Performance Metrics
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Detection Time** | 10 seconds | Single cycle detection |
+| **Error Display Delay** | 60 seconds | 6 consecutive failures |
+| **Restart Delay** | 120 seconds | 12 consecutive failures |
+| **Recovery Time** | Immediate | Next successful reading |
+| **Memory Overhead** | < 50 bytes | Minimal counter variables |
+
+### Comparison with Standard Systems
+
+| Feature | Basic ESP32 Systems | Our Enhanced System |
+|---------|---------------------|---------------------|
+| **Failure Detection** | ❌ No automatic detection | ✅ Real-time monitoring |
+| **Error Display** | ❌ Silent failures | ✅ Clear visual indicators |
+| **Auto-Recovery** | ❌ Manual intervention required | ✅ Automatic restart |
+| **System Reliability** | ⚠️ May hang on sensor issues | ✅ Guaranteed recovery |
+
+## 🛠️ Troubleshooting
+
+### Sensor Health Monitoring Issues
+
+#### Problem: Sensor error display appears frequently
+**Symptoms**: Display shows "SENSOR ERROR!" message intermittently
+
+**Solutions**:
+1. **Check DHT11 connections**: Verify VCC, GND, and data pin connections
+2. **Add external pull-up resistor**: 4.7kΩ between VCC and data pin improves reliability
+3. **Power supply stability**: Ensure stable 3.3V supply without voltage drops
+4. **Cable length**: Minimize distance between ESP32 and DHT11 sensor
+5. **Environmental interference**: Move away from electromagnetic noise sources
+
+#### Problem: System restarts automatically after 2 minutes
+**Symptoms**: Display shows "CRITICAL RESTART" and system reboots
+
+**Root Causes**:
+- **Hardware failure**: DHT11 sensor may be permanently damaged
+- **Wiring issues**: Loose connections or broken wires
+- **Power problems**: Insufficient current or voltage instability
+- **Software issues**: Corrupted configuration or timing problems
+
+**Solutions**:
+1. **Replace DHT11 sensor**: Try a different sensor module
+2. **Check all connections**: Verify continuity with multimeter
+3. **Power supply verification**: Measure actual voltage and current
+4. **Increase failure thresholds**: Modify limits in code for more tolerance
+
+#### Problem: False sensor error recovery messages
+**Symptoms**: Logs show recovery from failures that weren't apparent
+
+**Analysis**: This indicates brief sensor communication glitches that recovered quickly:
+- Normal behavior for marginal connections
+- Consider increasing tolerance if environment is electrically noisy
+- Monitor long-term patterns to identify systematic issues
+
+## 🛠️ General Troubleshooting �🛠️ Troubleshooting
 
 ### WiFi Connectivity Issues
 

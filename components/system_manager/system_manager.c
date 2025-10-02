@@ -157,10 +157,18 @@ static shared_sensor_data_t shared_data = {0};
 #define WIFI_TRANSMIT_INTERVAL_MS   30000   ///< WiFi transmission every 30 seconds
 #define WIFI_RECONNECT_INTERVAL_MS  60000   ///< WiFi reconnection attempt every 60 seconds
 
+// Sensor Health Monitoring Constants
+#define SENSOR_ERROR_DISPLAY_TIME_MS  60000   ///< Display error after 1 minute of sensor failures
+#define SENSOR_RESTART_TIME_MS       120000   ///< Restart system after 2 minutes of sensor failures
+#define SENSOR_FAILURE_COUNT_LIMIT   6       ///< Number of consecutive failures before error (60s / 10s intervals)
+#define SENSOR_RESTART_COUNT_LIMIT   12      ///< Number of consecutive failures before restart (120s / 10s intervals)
+
 /**
  * @brief Forward declarations
  */
 static void update_display_with_sensor_data(float temperature, float humidity);
+static void display_sensor_error(uint32_t failure_count);
+static void restart_system_due_to_sensor_failure(void);
 
 /**
  * @brief Initialize shared data structure with thread safety
@@ -272,6 +280,8 @@ static void sensor_task(void *pvParameters)
     ESP_LOGI(TAG, "DHT11 Sensor Task Started (Core %d, 10s interval)", xPortGetCoreID());
     
     uint32_t cycle_count = 0;
+    uint32_t consecutive_failures = 0;
+    bool error_displayed = false;
     TickType_t last_wake_time = xTaskGetTickCount();
     
     while (1) {
@@ -284,6 +294,13 @@ static void sensor_task(void *pvParameters)
         // Update shared data with thread safety
         if (xSemaphoreTake(shared_data.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (read_result == ESP_OK && sensor_reading.valid) {
+                // Successful sensor reading - reset failure counters
+                if (consecutive_failures > 0) {
+                    ESP_LOGI(TAG, "Sensor recovered after %lu consecutive failures", consecutive_failures);
+                    consecutive_failures = 0;
+                    error_displayed = false;
+                }
+                
                 shared_data.data = sensor_reading;
                 shared_data.timestamp = cycle_count;
                 shared_data.has_new_data = true;
@@ -294,14 +311,86 @@ static void sensor_task(void *pvParameters)
                 // Update display with new sensor data
                 update_display_with_sensor_data(sensor_reading.temperature, sensor_reading.humidity);
             } else {
+                // Sensor reading failed - increment failure counter
+                consecutive_failures++;
                 shared_data.has_new_data = false;
-                ESP_LOGW(TAG, "Sensor read failed: %s", esp_err_to_name(read_result));
+                
+                ESP_LOGW(TAG, "Sensor read failed: %s (failure %lu/%d)", 
+                         esp_err_to_name(read_result), consecutive_failures, SENSOR_RESTART_COUNT_LIMIT);
+                
+                // Check for sensor health safeguards
+                if (consecutive_failures >= SENSOR_RESTART_COUNT_LIMIT) {
+                    // 2 minutes of failures - restart system
+                    ESP_LOGE(TAG, "CRITICAL: Sensor failed for 2 minutes - restarting system");
+                    restart_system_due_to_sensor_failure();
+                } else if (consecutive_failures >= SENSOR_FAILURE_COUNT_LIMIT && !error_displayed) {
+                    // 1 minute of failures - display error
+                    ESP_LOGW(TAG, "WARNING: Sensor failed for 1 minute - displaying error");
+                    display_sensor_error(consecutive_failures);
+                    error_displayed = true;
+                } else if (consecutive_failures < SENSOR_FAILURE_COUNT_LIMIT) {
+                    // Still within normal failure tolerance - update display with last known data
+                    if (shared_data.data.valid) {
+                        update_display_with_sensor_data(shared_data.data.temperature, shared_data.data.humidity);
+                    }
+                }
             }
             xSemaphoreGive(shared_data.mutex);
         }
         
         vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS));
     }
+}
+
+/**
+ * @brief Display sensor error on screen when sensor fails for 1 minute
+ * 
+ * Shows a clear error message indicating sensor failure and the current failure count.
+ * This provides immediate visual feedback that the sensor system requires attention.
+ * 
+ * @param failure_count Number of consecutive sensor reading failures
+ */
+static void display_sensor_error(uint32_t failure_count)
+{
+    st7789_clear_screen(ST7789_BLACK);
+    st7789_draw_large_string(20, 50, "SENS0R", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(20, 100, "ERR0R!", ST7789_RED, ST7789_BLACK);
+    
+    char error_msg[20];
+    snprintf(error_msg, sizeof(error_msg), "ERR0R:%lu", failure_count);
+    st7789_draw_large_string(20, 150, error_msg, ST7789_YELLOW, ST7789_BLACK);
+    
+    ESP_LOGE(TAG, "Sensor error displayed: %lu consecutive failures", failure_count);
+}
+
+/**
+ * @brief Restart system due to critical sensor failure (2 minutes without readings)
+ * 
+ * Performs a controlled system restart when the DHT11 sensor has been unresponsive
+ * for 2 minutes (12 consecutive reading failures). This ensures the system attempts
+ * to recover from hardware issues that might be resolved by a restart.
+ * 
+ * The restart is logged for diagnostic purposes and performed using ESP32's
+ * built-in restart mechanism.
+ */
+static void restart_system_due_to_sensor_failure(void)
+{
+    ESP_LOGE(TAG, "CRITICAL SENSOR FAILURE: Restarting system in 5 seconds...");
+    
+    // Display critical error message
+    st7789_clear_screen(ST7789_BLACK);
+    st7789_draw_large_string(20, 50, "TEMP ERR0R", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(20, 100, "RESTART", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(20, 150, "IN 5S", ST7789_YELLOW, ST7789_BLACK);
+    
+    // Give user time to see the message
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    // Log restart reason
+    ESP_LOGE(TAG, "Performing system restart due to sensor failure");
+    
+    // Perform system restart
+    esp_restart();
 }
 
 /**
