@@ -545,6 +545,62 @@ esp_err_t wifi_manager_disconnect(void)
 }
 
 /**
+ * @brief Attempt to reconnect to WiFi network with fresh retry count
+ * 
+ * Resets the internal retry counter and attempts to reconnect to the configured
+ * WiFi network. This function is designed for automatic reconnection scenarios
+ * where the router comes back online after being disconnected.
+ * 
+ * Reconnection Process:
+ * 1. Reset internal retry counter to enable fresh connection attempts
+ * 2. Update status from ERROR back to CONNECTING if needed  
+ * 3. Initiate WiFi connection attempt with clean state
+ * 4. Let background event handlers manage the connection process
+ * 
+ * Use Cases:
+ * - Router power cycle recovery
+ * - Network outage recovery  
+ * - Periodic reconnection attempts in monitoring applications
+ * 
+ * Non-blocking Operation:
+ * Unlike wifi_manager_connect(), this function returns immediately after
+ * initiating the reconnection attempt. Use wifi_manager_get_status() to
+ * monitor connection progress.
+ * 
+ * @return ESP_OK if reconnection attempt initiated successfully
+ * @return ESP_FAIL if WiFi system is not ready for reconnection
+ * 
+ * @pre wifi_manager_init() must have completed successfully
+ * @post Retry counter reset and connection attempt initiated
+ * @note Non-blocking - returns immediately after initiating connection
+ * @see wifi_manager_get_status() to monitor reconnection progress
+ */
+esp_err_t wifi_manager_reconnect(void)
+{
+    ESP_LOGI(TAG, "Attempting WiFi reconnection with fresh retry count");
+    
+    // Reset retry counter to allow fresh connection attempts
+    retry_count = 0;
+    
+    // Update status if currently in error state
+    if (current_status == WIFI_STATUS_ERROR) {
+        current_status = WIFI_STATUS_CONNECTING;
+        ESP_LOGI(TAG, "Status updated from ERROR to CONNECTING for reconnection");
+    }
+    
+    // Initiate connection attempt
+    esp_err_t ret = esp_wifi_connect();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi reconnection attempt initiated successfully");
+    } else {
+        ESP_LOGE(TAG, "Failed to initiate WiFi reconnection: %s", esp_err_to_name(ret));
+        current_status = WIFI_STATUS_ERROR;
+    }
+    
+    return ret;
+}
+
+/**
  * @brief Get Current WiFi Connection Status
  * 
  * Returns the current WiFi connection state as tracked by the WiFi manager.

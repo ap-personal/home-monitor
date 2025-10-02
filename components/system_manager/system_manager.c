@@ -155,6 +155,7 @@ static shared_sensor_data_t shared_data = {0};
  */
 #define SENSOR_READ_INTERVAL_MS     10000   ///< DHT11 reading every 10 seconds
 #define WIFI_TRANSMIT_INTERVAL_MS   30000   ///< WiFi transmission every 30 seconds
+#define WIFI_RECONNECT_INTERVAL_MS  60000   ///< WiFi reconnection attempt every 60 seconds
 
 /**
  * @brief Forward declarations
@@ -407,12 +408,48 @@ static void wifi_task(void *pvParameters)
     ESP_LOGI(TAG, "WiFi Task Started (Core %d, 30s interval)", xPortGetCoreID());
     
     uint32_t transmission_count = 0;
+    uint32_t disconnection_time = 0;
+    bool was_connected = false;
     TickType_t last_wake_time = xTaskGetTickCount();
     
     while (1) {
         transmission_count++;
+        bool is_connected = wifi_manager_is_ready();
         
-        if (wifi_manager_is_ready()) {
+        // Detect WiFi disconnection and track disconnection time
+        if (was_connected && !is_connected) {
+            ESP_LOGW(TAG, "WiFi disconnection detected - starting reconnection monitoring");
+            disconnection_time = transmission_count;
+        }
+        
+        // If WiFi is not connected, attempt reconnection every 60 seconds (2 cycles)
+        if (!is_connected) {
+            uint32_t cycles_disconnected = transmission_count - disconnection_time;
+            uint32_t seconds_disconnected = cycles_disconnected * (WIFI_TRANSMIT_INTERVAL_MS / 1000);
+            
+            // Attempt reconnection every 60 seconds
+            if (disconnection_time > 0 && (cycles_disconnected % 2) == 0 && cycles_disconnected > 0) {
+                ESP_LOGI(TAG, "Attempting WiFi reconnection (disconnected for %lu seconds)", seconds_disconnected);
+                
+                // Reset retry counter in wifi_manager and attempt reconnection
+                esp_err_t reconnect_result = wifi_manager_reconnect();
+                if (reconnect_result == ESP_OK) {
+                    ESP_LOGI(TAG, "WiFi reconnection initiated successfully");
+                } else {
+                    ESP_LOGW(TAG, "WiFi reconnection attempt failed: %s", esp_err_to_name(reconnect_result));
+                }
+            }
+            
+            ESP_LOGW(TAG, "WiFi not ready (disconnected for %lu seconds)", seconds_disconnected);
+            was_connected = false;
+        } else {
+            // WiFi is connected - handle data transmission
+            if (!was_connected) {
+                ESP_LOGI(TAG, "WiFi connection restored!");
+                disconnection_time = 0;  // Reset disconnection tracking
+            }
+            was_connected = true;
+            
             // Prepare transmission data
             sensor_data_t wifi_data = {0};
             bool has_valid_data = false;
@@ -441,8 +478,6 @@ static void wifi_task(void *pvParameters)
             if (tx_result != ESP_OK) {
                 ESP_LOGW(TAG, "WiFi TX failed: %s", esp_err_to_name(tx_result));
             }
-        } else {
-            ESP_LOGW(TAG, " ");
         }
         
         vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(WIFI_TRANSMIT_INTERVAL_MS));
