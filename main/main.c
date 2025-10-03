@@ -86,11 +86,7 @@ void app_main(void)
 {
     // === SYSTEM IDENTIFICATION ===
     // Display system information for debugging and version tracking
-    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "   ESP32 Environmental Monitor v1.0");
-    ESP_LOGI(TAG, "   Hardware: ST7789 Display + DHT11 Sensor");
-    ESP_LOGI(TAG, "   Features: WiFi IoT Data Transmission");
-    ESP_LOGI(TAG, "========================================");
     
     // === SYSTEM INITIALIZATION PHASE ===
     // Initialize all hardware components and verify system readiness
@@ -101,7 +97,6 @@ void app_main(void)
         // Critical initialization failure - system cannot operate safely
         ESP_LOGE(TAG, "CRITICAL FAILURE: System initialization failed");
         ESP_LOGE(TAG, "Cannot continue - check hardware connections and power supply");
-        ESP_LOGE(TAG, "System halted to prevent undefined behavior");
         return;  // Exit application - do not attempt to continue
     }
     ESP_LOGI(TAG, "✓ System initialization completed successfully");
@@ -121,13 +116,8 @@ void app_main(void)
     
     // === OPERATIONAL CONFIRMATION ===
     // System is now fully operational and running autonomously
-    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "✓ ESP32 Environmental Monitor ACTIVE");
-    ESP_LOGI(TAG, "✓ Sensor monitoring: 3-second intervals");
-    ESP_LOGI(TAG, "✓ Display updates: Real-time");
-    ESP_LOGI(TAG, "✓ WiFi transmission: 60-second intervals");
     ESP_LOGI(TAG, "✓ System running autonomously");
-    ESP_LOGI(TAG, "========================================");
     
     // === AUTONOMOUS OPERATION ===
     // Main function completes here - system continues running via FreeRTOS tasks

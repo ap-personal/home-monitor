@@ -168,7 +168,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
     {
         // WiFi disconnected - implement retry logic with backoff
-        if (retry_count < WIFI_RETRY_COUNT) {
+        if (retry_count < WIFI_RETRY_COUNT) 
+        {
             esp_wifi_connect();
             retry_count++;
             current_status = WIFI_STATUS_CONNECTING;
@@ -583,16 +584,20 @@ esp_err_t wifi_manager_reconnect(void)
     retry_count = 0;
     
     // Update status if currently in error state
-    if (current_status == WIFI_STATUS_ERROR) {
+    if (current_status == WIFI_STATUS_ERROR) 
+    {
         current_status = WIFI_STATUS_CONNECTING;
         ESP_LOGI(TAG, "Status updated from ERROR to CONNECTING for reconnection");
     }
     
     // Initiate connection attempt
     esp_err_t ret = esp_wifi_connect();
-    if (ret == ESP_OK) {
+    if (ret == ESP_OK) 
+    {
         ESP_LOGI(TAG, "WiFi reconnection attempt initiated successfully");
-    } else {
+    } 
+    else 
+    {
         ESP_LOGE(TAG, "Failed to initiate WiFi reconnection: %s", esp_err_to_name(ret));
         current_status = WIFI_STATUS_ERROR;
     }

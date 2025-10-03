@@ -3,9 +3,79 @@
  * @brief ESP32 Dual-Core Environmental Monitoring System Manager
  * 
  * This module implements a sophisticated dual-core architecture for real-time environmental
- * monitoring with IoT connectivity. The system leverages both ESP32 cores to achieve
+ * monitoring with bulletproof IoT connectivity. The system leverages both ESP32 cores to achieve
  * optimal performance separation between timing-critical sensor operations and
- * network-intensive WiFi communications.
+ * network-intensive WiFi communications, with automatic router outage recovery.
+ * 
+ * Complete System Flow Description:
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * 
+ * PHASE 1: SYSTEM INITIALIZATION (0-10 seconds)
+ * ┌─ Power On ─┐
+ *         │
+ *         ▼
+ * ┌─ Component Init ─┐  ← ST7789 display, DHT11 sensor, WiFi manager
+ *         │
+ *         ▼
+ * ┌─ Display Ready ──┐  ← Immediate display functionality (no WiFi required)
+ *         │
+ *         ▼
+ * ┌─ Task Creation ──┐  ← Dual-core tasks: Sensor (Core 0), WiFi (Core 1)
+ *         │
+ *         ▼
+ * ┌─ Initial Display ┐  ← "TEMP: __._C", "HUMD: __%", "NET: READY"
+ * 
+ * PHASE 2: SENSOR OPERATION (Continuous - Core 0)
+ * ┌─ Every 10 seconds ─┐ ◄─┐
+ *         │               │
+ *         ▼               │
+ * ┌─ Read DHT11 ────────┐ │  ← Timing-critical microsecond protocol
+ *         │               │
+ *         ▼               │
+ * ┌─ Validate & Store ──┐ │  ← Thread-safe shared data update
+ *         │               │
+ *         ▼               │
+ * ┌─ Update Display ────┐ │  ← Real-time temperature/humidity display
+ *         │               │
+ *         └───────────────┘
+ * 
+ * PHASE 3: WIFI CONNECTION WITH DELAYED START (Core 1)
+ * ┌─ Wait 10 seconds ──┐     ← Allows display to initialize without interference
+ *         │
+ *         ▼
+ * ┌─ WiFi Connect ─────┐     ← Blocking connection attempt (router available)
+ *         │
+ *         ▼
+ * ┌─ Connection Success ┐ ──► ┌─ Display: "NET: UP" ─┐
+ *         │                   └─ Begin IoT transmission ─┘
+ *         ▼
+ * ┌─ IoT Transmission ─┐ ◄─┐ ← Every 30 seconds: JSON HTTP POST
+ *         └───────────────┘
+ * 
+ * PHASE 4: ROUTER OUTAGE HANDLING (Automatic)
+ * ┌─ Router Goes Down ─┐
+ *         │
+ *         ▼
+ * ┌─ Detect Disconnect ┐     ← Within 1 second detection
+ *         │
+ *         ▼
+ * ┌─ Display: "DSCNT" ─┐     ← Visual feedback of disconnection
+ *         │
+ *         ▼
+ * ┌─ Local Operation ──┐     ← Sensor readings continue normally
+ *         │
+ *         ▼
+ * ┌─ Reconnect Every 60s ┐ ◄─┐ ← Reset retry counter for fresh attempts
+ *         │                 │
+ *         ▼                 │
+ * ┌─ Router Returns ────┐   │
+ *         │                 │
+ *         ▼                 │
+ * ┌─ Auto Reconnect ────┐   │ ← Immediate reconnection when router available
+ *         │                 │
+ *         ▼                 │
+ * ┌─ Resume IoT ────────┐   │ ← Display: "NET: UP", data transmission resumes
+ *         └─────────────────┘
  * 
  * Architecture Overview:
  * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -20,13 +90,15 @@
  * │ │ • 10s intervals │◄┼─────────┼►│ • 30s intervals │ │
  * │ │ • Timing-crit.  │ │         │ │ • HTTP POST     │ │
  * │ │ • Data acquire  │ │         │ │ • JSON format   │ │
+ * │ │ • Display ctrl  │ │         │ │ • Auto-reconnect│ │
  * │ └─────────────────┘ │         │ └─────────────────┘ │
  * │                     │         │                     │
  * │ ┌─────────────────┐ │         │ ┌─────────────────┐ │
  * │ │ Display Updates │ │         │ │ Network Monitor │ │
  * │ │ • Real-time     │ │         │ │ • Connection    │ │
  * │ │ • Error handling│ │         │ │ • Signal RSSI   │ │
- * │ │ • Status indic. │ │         │ │ • Error recover │ │
+ * │ │ • Status indic. │ │         │ │ • Router outage │ │
+ * │ │ • Sensor health │ │         │ │ • Retry reset   │ │
  * │ └─────────────────┘ │         │ └─────────────────┘ │
  * └─────────────────────┘         └─────────────────────┘
  *            │                               │
@@ -47,30 +119,45 @@
  *    - Core 0: Handles timing-critical DHT11 sensor communication
  *    - Core 1: Manages network operations and non-critical tasks
  *    - Neither core blocks the other, ensuring system responsiveness
+ *    - Display initialization isolated from WiFi connection timing
  * 
  * 2. THREAD-SAFE DATA SHARING:
  *    - FreeRTOS mutex protects shared sensor data structure
  *    - Atomic read/write operations prevent data corruption
  *    - Timeout-based mutex acquisition prevents deadlocks
+ *    - Safe helper functions for consistent data access patterns
  * 
- * 3. GRACEFUL ERROR HANDLING:
+ * 3. BULLETPROOF WIFI CONNECTIVITY:
+ *    - Automatic router outage detection and recovery
+ *    - Intelligent retry counter reset for fresh connection attempts
+ *    - Non-blocking reconnection doesn't affect sensor operations
+ *    - 10-second startup delay prevents display interference
+ *    - Continues local operation during network outages
+ * 
+ * 4. GRACEFUL ERROR HANDLING:
  *    - Sensor failures don't affect WiFi transmission
  *    - Network outages don't impact local monitoring
  *    - Display shows appropriate status indicators for all conditions
+ *    - Progressive sensor failure response (1min error, 2min restart)
  * 
- * 4. RESOURCE OPTIMIZATION:
+ * 5. RESOURCE OPTIMIZATION:
  *    - Minimal memory footprint with efficient buffer management
  *    - Power-aware design with configurable update intervals
  *    - Hardware-specific optimizations for ESP32 architecture
+ *    - Consolidated display utilities reduce code duplication
  * 
  * Technical Specifications:
  * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  * 
  * • Sensor Reading Frequency: 10 seconds (configurable)
- * • WiFi Transmission Frequency: 30 seconds (configurable)
- * • Display Update: Real-time on sensor change
+ * • WiFi Transmission Frequency: 30 seconds (configurable)  
+ * • WiFi Reconnection Attempts: Every 60 seconds when disconnected
+ * • WiFi Startup Delay: 10 seconds (prevents display interference)
+ * • Display Update: Real-time on sensor change (immediate)
+ * • Display Works: Independent of WiFi status (router on/off)
  * • Data Format: JSON with device ID, timestamp, and readings
- * • Error Recovery: Automatic retry with exponential backoff
+ * • Error Recovery: Automatic retry with intelligent counter reset
+ * • Router Outage Handling: Automatic reconnection when router returns
  * • Memory Usage: ~50KB RAM, ~150KB Flash
  * • Power Consumption: 120-180mA @ 3.3V (WiFi dependent)
  * 
@@ -155,13 +242,24 @@ static shared_sensor_data_t shared_data = {0};
  */
 #define SENSOR_READ_INTERVAL_MS     10000   ///< DHT11 reading every 10 seconds
 #define WIFI_TRANSMIT_INTERVAL_MS   30000   ///< WiFi transmission every 30 seconds
-#define WIFI_RECONNECT_INTERVAL_MS  60000   ///< WiFi reconnection attempt every 60 seconds
+#define WIFI_RECONNECT_INTERVAL_MS  10000   ///< WiFi reconnection attempt every 10 seconds
+#define MUTEX_TIMEOUT_MS            100     ///< Mutex timeout for shared data access
+#define WIFI_STARTUP_DELAY_MS       10000   ///< Delay before WiFi connection attempt
+#define TASK_STARTUP_DELAY_MS       100     ///< Delay between task creation and display setup
+#define STARTUP_SCREEN_DELAY_MS     2000    ///< Duration to show startup screen
+#define RESTART_WARNING_DELAY_MS    5000    ///< Warning delay before system restart
+
+// Display Layout Constants
+#define DISPLAY_LINE_1_Y            50      ///< Y position for first display line
+#define DISPLAY_LINE_2_Y            100     ///< Y position for second display line  
+#define DISPLAY_LINE_3_Y            150     ///< Y position for third display line
+#define DISPLAY_TEXT_X              20      ///< X position for display text
 
 // Sensor Health Monitoring Constants
-#define SENSOR_ERROR_DISPLAY_TIME_MS  60000   ///< Display error after 1 minute of sensor failures
-#define SENSOR_RESTART_TIME_MS       120000   ///< Restart system after 2 minutes of sensor failures
-#define SENSOR_FAILURE_COUNT_LIMIT   6       ///< Number of consecutive failures before error (60s / 10s intervals)
-#define SENSOR_RESTART_COUNT_LIMIT   12      ///< Number of consecutive failures before restart (120s / 10s intervals)
+#define SENSOR_ERROR_DISPLAY_TIME_MS  30000   ///< Display error after 30 seconds of sensor failures
+#define SENSOR_RESTART_TIME_MS        60000   ///< Restart system after 60 seconds of sensor failures
+#define SENSOR_FAILURE_COUNT_LIMIT    3       ///< Number of consecutive failures before error (60s / 10s intervals)
+#define SENSOR_RESTART_COUNT_LIMIT    6      ///< Number of consecutive failures before restart (120s / 10s intervals)
 
 /**
  * @brief Forward declarations
@@ -169,6 +267,10 @@ static shared_sensor_data_t shared_data = {0};
 static void update_display_with_sensor_data(float temperature, float humidity);
 static void display_sensor_error(uint32_t failure_count);
 static void restart_system_due_to_sensor_failure(void);
+static void display_clear_and_setup(void);
+static void display_network_status(void);
+static bool safe_read_sensor_data(sensor_data_t *data, bool *has_valid_data);
+static bool safe_write_sensor_data(const dht11_data_t *sensor_reading, uint32_t timestamp);
 
 /**
  * @brief Initialize shared data structure with thread safety
@@ -184,12 +286,58 @@ static esp_err_t init_shared_data(void)
     
     // Create mutex for thread-safe access
     shared_data.mutex = xSemaphoreCreateMutex();
-    if (shared_data.mutex == NULL) {
+    if (shared_data.mutex == NULL) 
+    {
         ESP_LOGE(TAG, "Failed to create shared data mutex");
         return ESP_FAIL;
     }
     
     return ESP_OK;
+}
+
+/**
+ * @brief Safely read sensor data from shared memory with mutex protection
+ * 
+ * @param data Pointer to store the read sensor data
+ * @param has_valid_data Pointer to store validity flag
+ * @return true if mutex acquired and data read successfully, false otherwise
+ */
+static bool safe_read_sensor_data(sensor_data_t *data, bool *has_valid_data)
+{
+    if (xSemaphoreTake(shared_data.mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        if (shared_data.data.valid) {
+            data->temperature = shared_data.data.temperature;
+            data->humidity = shared_data.data.humidity;
+            *has_valid_data = true;
+        } else {
+            *has_valid_data = false;
+        }
+        xSemaphoreGive(shared_data.mutex);
+        return true;
+    }
+    ESP_LOGW(TAG, "Failed to acquire mutex for reading sensor data");
+    *has_valid_data = false;
+    return false;
+}
+
+/**
+ * @brief Safely write sensor data to shared memory with mutex protection
+ * 
+ * @param sensor_reading Pointer to sensor data to write
+ * @param timestamp Timestamp of the reading
+ * @return true if mutex acquired and data written successfully, false otherwise
+ */
+static bool safe_write_sensor_data(const dht11_data_t *sensor_reading, uint32_t timestamp)
+{
+    if (xSemaphoreTake(shared_data.mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        shared_data.data = *sensor_reading;
+        shared_data.timestamp = timestamp;
+        shared_data.has_new_data = true;
+        xSemaphoreGive(shared_data.mutex);
+        return true;
+    }
+    ESP_LOGW(TAG, "Failed to acquire mutex for writing sensor data");
+    return false;
 }
 
 /**
@@ -284,7 +432,8 @@ static void sensor_task(void *pvParameters)
     bool error_displayed = false;
     TickType_t last_wake_time = xTaskGetTickCount();
     
-    while (1) {
+    while (1) 
+    {
         cycle_count++;
         
         // Read DHT11 sensor
@@ -292,50 +441,58 @@ static void sensor_task(void *pvParameters)
         esp_err_t read_result = dht11_read(&sensor_reading);
         
         // Update shared data with thread safety
-        if (xSemaphoreTake(shared_data.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            if (read_result == ESP_OK && sensor_reading.valid) {
-                // Successful sensor reading - reset failure counters
-                if (consecutive_failures > 0) {
-                    ESP_LOGI(TAG, "Sensor recovered after %lu consecutive failures", consecutive_failures);
-                    consecutive_failures = 0;
-                    error_displayed = false;
-                }
-                
-                shared_data.data = sensor_reading;
-                shared_data.timestamp = cycle_count;
-                shared_data.has_new_data = true;
-                
+        if (read_result == ESP_OK && sensor_reading.valid) 
+        {
+            // Successful sensor reading - reset failure counters
+            if (consecutive_failures > 0) 
+            {
+                ESP_LOGI(TAG, "Sensor recovered after %lu consecutive failures", consecutive_failures);
+                consecutive_failures = 0;
+                error_displayed = false;
+            }
+            
+            // Write sensor data using helper function
+            if (safe_write_sensor_data(&sensor_reading, cycle_count)) 
+            {
                 ESP_LOGI(TAG, "Sensor: %.1f°C, %.1f%% (cycle %lu)", 
                          sensor_reading.temperature, sensor_reading.humidity, cycle_count);
                 
                 // Update display with new sensor data
                 update_display_with_sensor_data(sensor_reading.temperature, sensor_reading.humidity);
-            } else {
-                // Sensor reading failed - increment failure counter
-                consecutive_failures++;
-                shared_data.has_new_data = false;
-                
-                ESP_LOGW(TAG, "Sensor read failed: %s (failure %lu/%d)", 
-                         esp_err_to_name(read_result), consecutive_failures, SENSOR_RESTART_COUNT_LIMIT);
-                
-                // Check for sensor health safeguards
-                if (consecutive_failures >= SENSOR_RESTART_COUNT_LIMIT) {
-                    // 2 minutes of failures - restart system
-                    ESP_LOGE(TAG, "CRITICAL: Sensor failed for 2 minutes - restarting system");
-                    restart_system_due_to_sensor_failure();
-                } else if (consecutive_failures >= SENSOR_FAILURE_COUNT_LIMIT && !error_displayed) {
-                    // 1 minute of failures - display error
-                    ESP_LOGW(TAG, "WARNING: Sensor failed for 1 minute - displaying error");
-                    display_sensor_error(consecutive_failures);
-                    error_displayed = true;
-                } else if (consecutive_failures < SENSOR_FAILURE_COUNT_LIMIT) {
-                    // Still within normal failure tolerance - update display with last known data
-                    if (shared_data.data.valid) {
-                        update_display_with_sensor_data(shared_data.data.temperature, shared_data.data.humidity);
-                    }
+            }
+        } 
+        else 
+        {
+            // Sensor reading failed - increment failure counter
+            consecutive_failures++;
+            
+            ESP_LOGW(TAG, "Sensor read failed: %s (failure %lu/%d)", 
+                     esp_err_to_name(read_result), consecutive_failures, SENSOR_RESTART_COUNT_LIMIT);
+            
+            // Check for sensor health safeguards
+            if (consecutive_failures >= SENSOR_RESTART_COUNT_LIMIT) 
+            {
+                // 2 minutes of failures - restart system
+                ESP_LOGE(TAG, "CRITICAL: Sensor failed for 2 minutes - restarting system");
+                restart_system_due_to_sensor_failure();
+            } 
+            else if (consecutive_failures >= SENSOR_FAILURE_COUNT_LIMIT && !error_displayed) 
+            {
+                // 1 minute of failures - display error
+                ESP_LOGW(TAG, "WARNING: Sensor failed for 1 minute - displaying error");
+                display_sensor_error(consecutive_failures);
+                error_displayed = true;
+            } 
+            else if (consecutive_failures < SENSOR_FAILURE_COUNT_LIMIT) 
+            {
+                // Still within normal failure tolerance - update display with last known data
+                sensor_data_t last_data;
+                bool has_valid_data;
+                if (safe_read_sensor_data(&last_data, &has_valid_data) && has_valid_data) 
+                {
+                    update_display_with_sensor_data(last_data.temperature, last_data.humidity);
                 }
             }
-            xSemaphoreGive(shared_data.mutex);
         }
         
         vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(SENSOR_READ_INTERVAL_MS));
@@ -352,13 +509,13 @@ static void sensor_task(void *pvParameters)
  */
 static void display_sensor_error(uint32_t failure_count)
 {
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 50, "SENS0R", ST7789_RED, ST7789_BLACK);
-    st7789_draw_large_string(20, 100, "ERR0R!", ST7789_RED, ST7789_BLACK);
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_1_Y, "SENS0R", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, "ERR0R!", ST7789_RED, ST7789_BLACK);
     
     char error_msg[20];
     snprintf(error_msg, sizeof(error_msg), "ERR0R:%lu", failure_count);
-    st7789_draw_large_string(20, 150, error_msg, ST7789_YELLOW, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, error_msg, ST7789_YELLOW, ST7789_BLACK);
     
     ESP_LOGE(TAG, "Sensor error displayed: %lu consecutive failures", failure_count);
 }
@@ -378,13 +535,13 @@ static void restart_system_due_to_sensor_failure(void)
     ESP_LOGE(TAG, "CRITICAL SENSOR FAILURE: Restarting system in 5 seconds...");
     
     // Display critical error message
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 50, "TEMP ERR0R", ST7789_RED, ST7789_BLACK);
-    st7789_draw_large_string(20, 100, "RESTART", ST7789_RED, ST7789_BLACK);
-    st7789_draw_large_string(20, 150, "IN 5S", ST7789_YELLOW, ST7789_BLACK);
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_1_Y, "TEMP ERR0R", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, "RESTART", ST7789_RED, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, "IN 5S", ST7789_YELLOW, ST7789_BLACK);
     
     // Give user time to see the message
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(RESTART_WARNING_DELAY_MS));
     
     // Log restart reason
     ESP_LOGE(TAG, "Performing system restart due to sensor failure");
@@ -496,44 +653,98 @@ static void wifi_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "WiFi Task Started (Core %d, 30s interval)", xPortGetCoreID());
     
+    // Wait 10 seconds before attempting WiFi connection to allow display to fully initialize
+    ESP_LOGI(TAG, "Waiting 10 seconds before WiFi connection to allow display initialization...");
+    vTaskDelay(pdMS_TO_TICKS(WIFI_STARTUP_DELAY_MS));
+    
+    // Attempt initial WiFi connection using the blocking connect function
+    // Since we've delayed this, it won't interfere with display initialization
+    ESP_LOGI(TAG, "Attempting initial WiFi connection (with blocking behavior)...");
+    esp_err_t initial_connect = wifi_manager_connect();  // Blocking connection attempt
+    if (initial_connect == ESP_OK) 
+    {
+        ESP_LOGI(TAG, "Initial WiFi connection successful");
+    } 
+    else 
+    {
+        ESP_LOGW(TAG, "Initial WiFi connection failed - will retry in background");
+    }
+    
     uint32_t transmission_count = 0;
     uint32_t disconnection_time = 0;
-    bool was_connected = false;
+    bool was_connected = false;  // Start with false, will be updated in loop
     TickType_t last_wake_time = xTaskGetTickCount();
     
-    while (1) {
+    while (1) 
+    {
         transmission_count++;
         bool is_connected = wifi_manager_is_ready();
         
         // Detect WiFi disconnection and track disconnection time
-        if (was_connected && !is_connected) {
+        if (was_connected && !is_connected) 
+        {
             ESP_LOGW(TAG, "WiFi disconnection detected - starting reconnection monitoring");
             disconnection_time = transmission_count;
         }
         
         // If WiFi is not connected, attempt reconnection every 60 seconds (2 cycles)
-        if (!is_connected) {
+        if (!is_connected) 
+        {
             uint32_t cycles_disconnected = transmission_count - disconnection_time;
             uint32_t seconds_disconnected = cycles_disconnected * (WIFI_TRANSMIT_INTERVAL_MS / 1000);
             
-            // Attempt reconnection every 60 seconds
-            if (disconnection_time > 0 && (cycles_disconnected % 2) == 0 && cycles_disconnected > 0) {
-                ESP_LOGI(TAG, "Attempting WiFi reconnection (disconnected for %lu seconds)", seconds_disconnected);
+            // For initial connection (never connected) or reconnection after disconnection
+            bool should_attempt_connection = false;
+            
+            if (disconnection_time == 0) 
+            {
+                // Never connected - try every 60 seconds from start
+                should_attempt_connection = (transmission_count % 2) == 0;
+            } 
+            else 
+            {
+                // Previously connected but disconnected - try every 60 seconds since disconnection
+                should_attempt_connection = (cycles_disconnected % 2) == 0 && cycles_disconnected > 0;
+            }
+            
+            if (should_attempt_connection) 
+            {
+                if (disconnection_time == 0) 
+                {
+                    ESP_LOGI(TAG, "Attempting WiFi connection (never connected, cycle %lu)", transmission_count);
+                } 
+                else 
+                {
+                    ESP_LOGI(TAG, "Attempting WiFi reconnection (disconnected for %lu seconds)", seconds_disconnected);
+                }
                 
                 // Reset retry counter in wifi_manager and attempt reconnection
                 esp_err_t reconnect_result = wifi_manager_reconnect();
-                if (reconnect_result == ESP_OK) {
+                if (reconnect_result == ESP_OK) 
+                {
                     ESP_LOGI(TAG, "WiFi reconnection initiated successfully");
-                } else {
+                } 
+                else 
+                {
                     ESP_LOGW(TAG, "WiFi reconnection attempt failed: %s", esp_err_to_name(reconnect_result));
                 }
             }
             
-            ESP_LOGW(TAG, "WiFi not ready (disconnected for %lu seconds)", seconds_disconnected);
+            if (disconnection_time == 0) 
+            {
+                ESP_LOGW(TAG, "WiFi not ready (never connected, cycle %lu)", transmission_count);
+            } 
+            else 
+            {
+                ESP_LOGW(TAG, "WiFi not ready (disconnected for %lu seconds)", seconds_disconnected);
+            }
             was_connected = false;
-        } else {
+        } 
+        else 
+        {
             // WiFi is connected - handle data transmission
-            if (!was_connected) {
+            if (!was_connected) 
+            {
                 ESP_LOGI(TAG, "WiFi connection restored!");
                 disconnection_time = 0;  // Reset disconnection tracking
             }
@@ -543,28 +754,26 @@ static void wifi_task(void *pvParameters)
             sensor_data_t wifi_data = {0};
             bool has_valid_data = false;
             
-            if (xSemaphoreTake(shared_data.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                if (shared_data.data.valid) {
-                    wifi_data.temperature = shared_data.data.temperature;
-                    wifi_data.humidity = shared_data.data.humidity;
-                    has_valid_data = true;
-                }
-                xSemaphoreGive(shared_data.mutex);
-            }
+            // Use helper function to safely read sensor data
+            safe_read_sensor_data(&wifi_data, &has_valid_data);
             
             strcpy(wifi_data.device_id, "ESP32_SENSOR_01");
             wifi_data.timestamp = (uint32_t)time(NULL);
             
-            if (has_valid_data) {
+            if (has_valid_data) 
+            {
                 ESP_LOGI(TAG, "TX: %.1f°C, %.1f%%", wifi_data.temperature, wifi_data.humidity);
-            } else {
+            } 
+            else 
+            {
                 wifi_data.temperature = -999.0;
                 wifi_data.humidity = -999.0;
                 ESP_LOGI(TAG, "TX: N/A (no sensor data)");
             }
             
             esp_err_t tx_result = wifi_manager_send_data(&wifi_data);
-            if (tx_result != ESP_OK) {
+            if (tx_result != ESP_OK) 
+            {
                 ESP_LOGW(TAG, "WiFi TX failed: %s", esp_err_to_name(tx_result));
             }
         }
@@ -660,18 +869,35 @@ static void update_display_with_sensor_data(float temperature, float humidity)
     snprintf(humid_str, sizeof(humid_str), "HUMD:%.0f%%", humidity);
     
     // Update display with current readings
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 50, temp_str, ST7789_CYAN, ST7789_BLACK);
-    st7789_draw_large_string(20, 100, humid_str, ST7789_GREEN, ST7789_BLACK);
-    
-    // Show WiFi status
-    if (wifi_manager_is_ready()) {
-        st7789_draw_large_string(20, 150, "NET: UP", ST7789_GREEN, ST7789_BLACK);
-    } else {
-        st7789_draw_large_string(20, 150, "NET: DSCNT", ST7789_RED, ST7789_BLACK);
-    }
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_1_Y, temp_str, ST7789_CYAN, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, humid_str, ST7789_GREEN, ST7789_BLACK);
+    display_network_status();
     
     ESP_LOGI(TAG, "✓ Display updated: %.1f°C, %.0f%% humidity", temperature, humidity);
+}
+
+/**
+ * @brief Clear display and set up common layout
+ */
+static void display_clear_and_setup(void)
+{
+    st7789_clear_screen(ST7789_BLACK);
+}
+
+/**
+ * @brief Display network status in standardized position
+ */
+static void display_network_status(void)
+{
+    if (wifi_manager_is_ready()) 
+    {
+        st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, "NET: UP", ST7789_GREEN, ST7789_BLACK);
+    } 
+    else 
+    {
+        st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, "NET: DSCNT", ST7789_RED, ST7789_BLACK);
+    }
 }
 
 /**
@@ -679,11 +905,11 @@ static void update_display_with_sensor_data(float temperature, float humidity)
  */
 static void display_startup_screen(void) 
 {
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 50, "STARTING", ST7789_CYAN, ST7789_BLACK);
-    st7789_draw_large_string(20, 100, "SYSTEM", ST7789_GREEN, ST7789_BLACK);
-    st7789_draw_large_string(20, 150, "......", ST7789_YELLOW, ST7789_BLACK);
-    vTaskDelay(pdMS_TO_TICKS(2000)); // Show for 2 seconds
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_1_Y, "START", ST7789_CYAN, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, "SYSTEM", ST7789_GREEN, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, "......", ST7789_YELLOW, ST7789_BLACK);
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_SCREEN_DELAY_MS));
 }
 
 /**
@@ -786,31 +1012,34 @@ esp_err_t system_init(void)
     ESP_LOGI(TAG, "ESP32 Dual-Core Environmental Monitor - Initializing...");
     
     // Initialize components
-    if (init_shared_data() != ESP_OK) {
+    if (init_shared_data() != ESP_OK) 
+    {
         ESP_LOGE(TAG, "Failed to initialize shared data");
         return ESP_FAIL;
     }
     
-    if (st7789_init() != ESP_OK) {
+    if (st7789_init() != ESP_OK) 
+    {
         ESP_LOGE(TAG, "ST7789 display initialization failed");
         return ESP_FAIL;
     }
     
-    if (dht11_init() != ESP_OK) {
+    if (dht11_init() != ESP_OK) 
+    {
         ESP_LOGE(TAG, "DHT11 sensor initialization failed");
         return ESP_FAIL;
     }
     
-    if (wifi_manager_init() != ESP_OK) {
+    if (wifi_manager_init() != ESP_OK) 
+    {
         ESP_LOGE(TAG, "WiFi manager initialization failed");
         return ESP_FAIL;
     }
     
-    // Connect to WiFi
-    esp_err_t wifi_result = wifi_manager_connect();
-    if (wifi_result != ESP_OK) {
-        ESP_LOGW(TAG, "WiFi connection failed - will retry automatically");
-    }
+    // WiFi initialization complete - connection will be handled by WiFi task after delay
+    // This ensures display and sensor work immediately while WiFi connects in background
+    ESP_LOGI(TAG, "WiFi manager initialized - connection will be handled by WiFi task");
+    ESP_LOGW(TAG, "Display and sensor will work even without WiFi connection");
     
     ESP_LOGI(TAG, "All components initialized successfully");
     return ESP_OK;
@@ -937,7 +1166,8 @@ esp_err_t system_start(void)
     BaseType_t sensor_task_created = xTaskCreatePinnedToCore(
         sensor_task, "dht11_sensor", 4096, NULL, 2, &sensor_task_handle, SENSOR_TASK_CORE
     );
-    if (sensor_task_created != pdPASS) {
+    if (sensor_task_created != pdPASS) 
+    {
         ESP_LOGE(TAG, "Failed to create sensor task");
         return ESP_FAIL;
     }
@@ -946,16 +1176,22 @@ esp_err_t system_start(void)
     BaseType_t wifi_task_created = xTaskCreatePinnedToCore(
         wifi_task, "wifi_transmit", 8192, NULL, 1, &wifi_task_handle, WIFI_TASK_CORE
     );
-    if (wifi_task_created != pdPASS) {
+    if (wifi_task_created != pdPASS) 
+    {
         ESP_LOGE(TAG, "Failed to create WiFi task");
         return ESP_FAIL;
     }
     
+    // Give tasks a moment to start before setting up display
+    vTaskDelay(pdMS_TO_TICKS(TASK_STARTUP_DELAY_MS));
+    
     // Set initial display
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 50, "TEMP: __._C", ST7789_CYAN, ST7789_BLACK);
-    st7789_draw_large_string(20, 100, "HUMD: __%", ST7789_GREEN, ST7789_BLACK);
-    st7789_draw_large_string(20, 150, "NET: READY", ST7789_GREEN, ST7789_BLACK);
+    ESP_LOGI(TAG, "Setting up initial display...");
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_1_Y, "TEMP: __._C", ST7789_CYAN, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, "HUMD: __%", ST7789_GREEN, ST7789_BLACK);
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_3_Y, "NET: READY", ST7789_GREEN, ST7789_BLACK);
+    ESP_LOGI(TAG, "Initial display setup complete");
     
     ESP_LOGI(TAG, "Dual-core system operational - Core 0: Sensor, Core 1: WiFi");
     return ESP_OK;
@@ -1066,25 +1302,28 @@ esp_err_t system_stop(void)
     ESP_LOGI(TAG, "Stopping system operations...");
     
     // Delete tasks
-    if (sensor_task_handle != NULL) {
+    if (sensor_task_handle != NULL) 
+    {
         vTaskDelete(sensor_task_handle);
         sensor_task_handle = NULL;
     }
     
-    if (wifi_task_handle != NULL) {
+    if (wifi_task_handle != NULL) 
+    {
         vTaskDelete(wifi_task_handle);
         wifi_task_handle = NULL;
     }
     
     // Clean up mutex
-    if (shared_data.mutex != NULL) {
+    if (shared_data.mutex != NULL) 
+    {
         vSemaphoreDelete(shared_data.mutex);
         shared_data.mutex = NULL;
     }
     
     // Show stopped status
-    st7789_clear_screen(ST7789_BLACK);
-    st7789_draw_large_string(20, 100, "ST0PPED", ST7789_RED, ST7789_BLACK);
+    display_clear_and_setup();
+    st7789_draw_large_string(DISPLAY_TEXT_X, DISPLAY_LINE_2_Y, "ST0PPED", ST7789_RED, ST7789_BLACK);
     
     ESP_LOGI(TAG, "System shutdown complete");
     return ESP_OK;

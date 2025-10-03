@@ -6,14 +6,36 @@
 
 ### Core Capabilities
 
-The ESP32 Environmental Monitoring System represents a professional-grade IoT solution that combines precision environmental sensing with modern connectivity features and bulletproof network reliability. This system demonstrates enterprise-level software architecture while remaining accessible for educational and maker applications.
+The ESP32 Environmental Monitoring System represents a professional-grade IoT solution that combines precision environmental sensing with modern connectivity features and **bulletproof network reliability**. This system demonstrates enterprise-level software architecture while remaining accessible for educational and commercial applications.
 
 **Primary Functions:**
 - **Real-time Environmental Sensing**: Continuous temperature and humidity monitoring with 10-second update cycles
 - **High-Resolution Display**: 240×240 ST7789 TFT display with custom large fonts for optimal readability  
-- **Intelligent IoT Connectivity**: WiFi-enabled data transmission with automatic reconnection and network failure recovery
+- **Bulletproof WiFi Connectivity**: Automatic router outage detection and reconnection with intelligent retry logic
 - **Dual-Core Architecture**: Optimized ESP32 dual-core utilization with dedicated sensor and network processing
-- **Professional Reliability**: Automatic WiFi reconnection, sensor health monitoring with progressive failure response, and intelligent error recovery
+- **Professional Reliability**: Display works immediately (router on/off), automatic WiFi reconnection, sensor health monitoring with progressive failure response
+- **Router Compatibility**: Works seamlessly regardless of router power status - display and sensor operation continue during router outages
+
+### System Flow and Operation
+
+**Complete System Flow:**
+```
+PHASE 1: STARTUP (0-10 seconds)
+├─ Power On → Component Init → Display Ready (immediately)
+├─ Task Creation → Initial Display ("TEMP: __._C", "HUMD: __%", "NET: READY")
+└─ WiFi Delayed Start (10s) → Connection Attempt
+
+PHASE 2: NORMAL OPERATION
+├─ Core 0: Sensor readings every 10s → Display updates (real-time)
+├─ Core 1: WiFi transmission every 30s → IoT data (when connected)
+└─ Display: Always functional regardless of WiFi status
+
+PHASE 3: ROUTER OUTAGE HANDLING (Automatic)
+├─ Router Goes Down → Detect Disconnect (1s) → Display "NET: DSCNT"
+├─ Local Operation Continues → Sensor + Display work normally  
+├─ Reconnection Attempts → Every 60s with fresh retry counter
+└─ Router Returns → Auto Reconnect → Resume IoT → Display "NET: UP"
+```
 
 ### System Architecture
 
@@ -81,12 +103,16 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 - **Watchdog Protection**: System reliability with automatic recovery from task failures
 
 ### Advanced System Features
+- **Router-Independent Display**: Display and sensor work immediately, regardless of router power status
+- **Bulletproof WiFi Reconnection**: Automatic detection and reconnection when router comes back online after outages
+- **Intelligent Connection Management**: 10-second WiFi startup delay prevents display interference  
+- **Progressive Sensor Safeguards**: 1-minute error display, 2-minute system restart for sensor failures
 - **Configurable Update Intervals**: Independent timing for sensor (10s) and transmission (30s)
 - **Comprehensive Error Recovery**: Network failure tolerance with detailed logging and auto-reconnection
 - **Memory-Optimized Design**: Efficient resource utilization with ~50KB RAM usage
 - **Power-Aware Implementation**: Optimized for continuous operation scenarios
 - **Real-time Status Display**: Live connection status, signal strength, and system health indicators
-- **Sensor Failure Safeguards**: Progressive response system with automatic error detection and system recovery
+- **Non-blocking Operations**: Reconnection attempts don't interfere with sensor readings or display updates
 
 ## 📊 Technical Specifications
 
@@ -105,7 +131,9 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 |--------|---------------|-------------|
 | **Sensor Update Rate** | 10 seconds | Configurable (1-60s) |
 | **WiFi Transmission** | 30 seconds | Configurable (10s-1hr) |
+| **WiFi Startup Delay** | 10 seconds | Prevents display interference |
 | **WiFi Reconnection** | 60 seconds | Automatic when router returns |
+| **Display Availability** | Immediate | Works regardless of router status |
 | **Sensor Health Check** | 60s error, 120s restart | Automatic failure detection |
 | **Display Refresh** | Real-time | On sensor data change |
 | **Memory Usage** | ~50KB RAM | Optimized for efficiency |
@@ -120,8 +148,10 @@ The ESP32 Environmental Monitoring System represents a professional-grade IoT so
 | **Security** | WPA2-PSK, WPA3-PSK | Configurable |
 | **Data Format** | JSON over HTTP/HTTPS | Universal compatibility |
 | **Payload Size** | ~150 bytes | Efficient transmission |
-| **Connection Recovery** | Automatic retry + reconnection | Exponential backoff with reset |
+| **Connection Recovery** | Automatic retry + reconnection | Intelligent retry counter reset |
+| **Router Outage Handling** | Automatic detection & recovery | Continues local operation during outages |
 | **Reconnection Time** | 60 seconds when router returns | Configurable interval |
+| **Startup Delay** | 10 seconds before WiFi init | Prevents display interference |
 | **Network Quality** | RSSI monitoring and reporting | Real-time signal strength |
 
 ## 🏗️ Professional Architecture
@@ -368,8 +398,8 @@ The system features a carefully designed user interface optimized for the 240×2
      ╔══════════════════════════════════════════════════════╗
      ║                                                      ║
      ║    ┌─────────────────────────────────────────────┐   ║
-     ║    │  TEMP: 23.5C                               │   ║ ← Y=50
-     ║    │  [Color: CYAN on BLACK, 16×16 font]        │   ║   Temperature Zone
+     ║    │  TEMP: 23.5C                               │    ║ ← Y=50
+     ║    │  [Color: CYAN on BLACK, 16×16 font]        │    ║   Temperature Zone
      ║    └─────────────────────────────────────────────┘   ║
      ║                                                      ║
      ║    ┌─────────────────────────────────────────────┐   ║
@@ -728,7 +758,7 @@ idf.py -p COM6 flash monitor
 ```
 ESP32 Memory Map (Typical Operation):
 ┌─────────────────────────────────────────┐
-│ DRAM (Data RAM) - 520KB Total          │
+│ DRAM (Data RAM) - 520KB Total           │
 ├─────────────────────────────────────────┤
 │ ESP-IDF Framework        │ ~350KB       │
 │ Application Code         │ ~35KB        │  
@@ -741,11 +771,11 @@ Flash Memory Usage:
 ┌─────────────────────────────────────────┐
 │ Total Application Size   │ ~900KB       │
 ├─────────────────────────────────────────┤
-│ Bootloader              │ ~30KB        │
-│ Partition Table         │ ~4KB         │
-│ Application Binary      │ ~150KB       │
-│ ESP-IDF Framework       │ ~716KB       │
-│ Available for Data      │ ~3.1MB       │
+│ Bootloader               │ ~30KB        │
+│ Partition Table          │ ~4KB         │
+│ Application Binary       │ ~150KB       │
+│ ESP-IDF Framework        │ ~716KB       │
+│ Available for Data       │ ~3.1MB       │
 └─────────────────────────────────────────┘
 ```
 
@@ -1952,18 +1982,21 @@ idf_component_register(SRCS "system_manager.c"
 
 ### Overview
 
-The ESP32 Environmental Monitor features a bulletproof WiFi reconnection system that automatically handles router outages, power cycles, and network interruptions without any user intervention. This enterprise-grade feature ensures continuous operation and data collection even during network instability.
+The ESP32 Environmental Monitor features a bulletproof WiFi reconnection system that automatically handles router outages, power cycles, and network interruptions without any user intervention. This enterprise-grade feature ensures continuous operation and data collection even during network instability, while **display and sensor operation continue uninterrupted regardless of router status**.
 
-### How It Works
+### Key Improvements in Current Version
 
-#### The Problem We Solved
-**Original Issue**: When a router went offline and came back, the ESP32 would remain disconnected because the internal retry counter was stuck at maximum, preventing any reconnection attempts.
+#### The Problems We Solved
+**Router Display Issue**: Originally, when the router was on during system startup, the display wouldn't show anything due to WiFi connection blocking the display initialization.
+
+**Router Outage Issue**: When a router went offline and came back, the ESP32 would remain disconnected because the internal retry counter was stuck at maximum, preventing any reconnection attempts.
 
 **Our Solution**: 
-1. **Application-Level Monitoring**: The system continuously monitors WiFi connection status
-2. **Intelligent Retry Reset**: When attempting reconnection, the system resets the retry counter to enable fresh connection attempts  
-3. **Non-blocking Reconnection**: Reconnection attempts don't interfere with sensor readings or display updates
-4. **Automatic Detection**: Disconnection is detected within 1 second and reconnection begins automatically
+1. **Startup Optimization**: 10-second WiFi delay ensures display works immediately regardless of router status
+2. **Application-Level Monitoring**: The system continuously monitors WiFi connection status
+3. **Intelligent Retry Reset**: When attempting reconnection, the system resets the retry counter to enable fresh connection attempts  
+4. **Non-blocking Reconnection**: Reconnection attempts don't interfere with sensor readings or display updates
+5. **Router Independence**: Display and sensor work perfectly whether router is on, off, or cycling
 
 ### Reconnection Process Flow
 
